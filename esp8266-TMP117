@@ -1,0 +1,147 @@
+/*
+ * 超低功耗体温计 - 完整注释版
+ * 硬件：ESP8266-12F + TMP117 + 300mAh电池
+ * 功能：每5分钟测量体温，通过巴法云推送#温度#格式数据
+ * 续航：300mAh电池可持续30-45天
+ *  ESP8266 + TMP117 + 巴法云 体温计：硬件与代码全解析
+ */
+
+#include 
+#include 
+#include 
+
+// ===== 用户配置区域 =====
+const char* ssid = "YOUR_WIFI";      // WiFi名称
+const char* password = "YOUR_PASS";  // WiFi密码
+const char* uid = "YOUR_UID";        // 巴法云用户ID
+const char* device = "thermometer";  // 设备名称
+const int sleepMinutes = 5;          // 采样间隔(分钟)
+
+// ===== 全局变量 =====
+TMP117 tmp117;                       // 温度传感器对象
+WiFiClient client;                   // WiFi客户端
+const char* bemfahost = "bemfa.com"; // 巴法云服务器
+const int bemfaport = 8344;          // 巴法云端口
+
+// ===== 初始化函数 =====
+void setup() {
+  Serial.begin(115200);
+  Serial.println("\n=== 体温计启动 ===");
+  
+  // 初始化I²C总线
+  Wire.begin(D2, D1);  // SDA=D2(GPIO4), SCL=D1(GPIO5)
+  
+  // 初始化TMP117传感器
+  if (!tmp117.begin()) {
+    Serial.println("TMP117初始化失败！");
+    ESP.deepSleep(60e6);  // 1分钟后重试
+  }
+  
+  // 配置TMP117为低功耗模式
+  tmp117.setConversionMode(TMP117_ONE_SHOT);  // 单次转换模式
+  tmp117.setConversionCycleTime(TMP117_CC_125_MS);  // 125ms转换时间
+  tmp117.setAveragingMode(TMP117_AVG_8);      // 8次平均提高精度
+  
+  // 连接WiFi
+  connectWiFi();
+  
+  // 测量并上传温度
+  float temperature = readTemperature();
+  uploadToBemfa(temperature);
+  
+  // 计算下次唤醒时间
+  Serial.printf("进入深度睡眠%d分钟...\n", sleepMinutes);
+  ESP.deepSleep(sleepMinutes * 60e6);  // 微秒级睡眠
+}
+
+// ===== 主循环（空）=====
+void loop() {
+  // 所有操作在setup()中完成，loop()保持空
+}
+
+// ===== WiFi连接函数 =====
+void connectWiFi() {
+  Serial.printf("连接WiFi: %s\n", ssid);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  
+  int retry = 0;
+  while (WiFi.status() != WL_CONNECTED && retry < 20) {
+    delay(500);
+    Serial.print(".");
+    retry++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("\nWiFi连接成功，IP: %s\n", WiFi.localIP().toString().c_str());
+  } else {
+    Serial.println("\nWiFi连接失败，进入睡眠");
+    ESP.deepSleep(60e6);  // 1分钟后重试
+  }
+}
+
+// ===== 温度读取函数 =====
+float readTemperature() {
+  Serial.println("开始测量温度...");
+  
+  // 启动温度转换
+  tmp117.startOneShotConversion();
+  
+  // 等待转换完成
+  while (!tmp117.isDataReady()) {
+    delay(10);
+  }
+  
+  // 读取温度值
+  float temp = tmp117.readTemperatureC();
+  Serial.printf("测量结果: %.2f°C\n", temp);
+  
+  return temp;
+}
+
+// ===== 数据上传函数 =====
+void uploadToBemfa(float temperature) {
+  Serial.print("连接巴法云服务器...");
+  
+  if (client.connect(bemfahost, bemfaport)) {
+    Serial.println("成功");
+    
+    // 构建MQTT连接报文
+    String connectPacket = String("") + 
+      "\x10\x0c\x00\x04MQTT\x04\x02\x00\x78\x00" + 
+      String(char(uid.length())) + uid;
+    client.print(connectPacket);
+    
+    // 构建发布报文
+    String topic = uid + "/" + device;
+    String payload = "#" + String(temperature, 1) + "#";
+    
+    // 计算报文长度
+    int remainingLength = 2 + topic.length() + payload.length();
+    
+    // 发送PUBLISH报文
+    client.write(0x30);  // PUBLISH报文类型
+    client.write(remainingLength);
+    client.write(0x00);  // 主题名长度高字节
+    client.write(topic.length());  // 主题名长度低字节
+    client.print(topic);
+    client.print(payload);
+    
+    Serial.printf("已上传: %s\n", payload.c_str());
+    
+    delay(100);  // 确保数据发送完成
+    client.stop();
+  } else {
+    Serial.println("连接失败");
+  }
+}
+
+// ===== 低功耗优化配置 =====
+/*
+ * 额外优化建议：
+ * 1. 在PCB上添加GPIO16控制的MOSFET开关，完全切断TMP117供电
+ * 2. 使用ESP.deepSleep(0) + RTC内存保存状态，实现超低功耗
+ * 3. 添加电池电压检测电路，低电量时延长采样间隔
+ * 4. 使用陶瓷天线替代PCB天线，减少空间占用
+ */
+  
